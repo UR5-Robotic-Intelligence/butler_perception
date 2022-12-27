@@ -58,6 +58,9 @@ class PCLProcessor:
     objects_cloud.colors = o3d.utility.Vector3dVector(colors[:, :3])
     if visualize:
       o3d.visualization.draw_geometries([objects_cloud])
+    msg = rospy.wait_for_message("/camera/color/image_raw", Image)
+    image_np = numpify(msg)
+    image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
     objects_boundaries = []
     object_pixels = []
     object_points_wrt_camera = []
@@ -77,9 +80,6 @@ class PCLProcessor:
       pixels = self.rs_helpers.calculate_pixels_from_points(points, intrinsics, cam_to_cam_extrinsics=extrinsics)
       # print(pixels)
       # pixels = np.round(pixels).astype(np.uint16)
-      msg = rospy.wait_for_message("/camera/color/image_raw", Image)
-      image_np = numpify(msg)
-      image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
       pixels = self.rs_helpers.adjust_pixels_to_boundary(
       pixels, (image_np.shape[1], image_np.shape[0]))
       rh = 0
@@ -107,7 +107,7 @@ class PCLProcessor:
     return objects_boundaries, image_np, object_pixels, object_points_wrt_camera, object_points_wrt_aruco
   
   def find_object(self, object_names):
-      objects_on_table_roi, image_np, _, _, _ = self.segment_pcl(visualize=False)
+      objects_on_table_roi, image_np, object_pixels, _, _ = self.segment_pcl(visualize=False)
       # image = PILImage.fromarray(np.uint8(image_np)*255)
       objects_images = []
       for object_roi in objects_on_table_roi:
@@ -139,13 +139,14 @@ class PCLProcessor:
           print(probs[0])
           if (probs[0][obj_idx] > 0.7):
               print("Object {} is {}".format(i, object_names[obj_idx]))
-              detected_objects.append((obj_idx, objects_on_table_roi[i]))
+              detected_objects.append((obj_idx, objects_on_table_roi[i], i))
       
-      for i, detected_object in detected_objects:
+      for i, detected_object, img_idx in detected_objects:
           # print("Object {} is {}".format(i, object_names[i]))
           if detected_object is not None:
               cv2.rectangle(image_np, (detected_object[0][0], detected_object[0][1]), (detected_object[1][0], detected_object[1][1]), (0, 255, 0), 2)
               cv2.putText(image_np, object_names[i], (detected_object[0][0], detected_object[0][1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+              # image_np[object_pixels[img_idx][1], object_pixels[img_idx][0]] = [255, 0, 0]
       cv2.imshow("image", image_np)
       cv2.waitKey(10)
       return detected_objects
