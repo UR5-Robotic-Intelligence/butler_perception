@@ -34,7 +34,7 @@ class PCLProcessor:
     dist_mat = np_points.T
     dist_mat = transform_dist_mat(dist_mat, 'camera_color_optical_frame', 'aruco_base')
     np_points = dist_mat.T
-    limits = {'x_min': 0.46799999999999997, 'x_max': 1.157, 'y_min': -0.06600000000000006, 'y_max': 2.0, 'z_min': -0.7050000000000001, 'z_max': 0.6760000000000002}
+    limits = {'x_min': 0.46799999999999997, 'x_max': 1.157, 'y_min': -0.07800000000000007, 'y_max': 2.0, 'z_min': -0.7050000000000001, 'z_max': 0.6760000000000002}
     x_cond = np.logical_and(np_points[:, 0] >= limits["x_min"], np_points[:, 0] <= limits["x_max"])
     y_cond = np.logical_and(np_points[:, 1] >= limits["y_min"], np_points[:, 1] <= limits["y_max"])
     z_cond = np.logical_and(np_points[:, 2] >= limits["z_min"], np_points[:, 2] <= limits["z_max"])
