@@ -14,11 +14,11 @@ import cv2
 from ros_numpy import numpify
 import clip
 import torch
+from copy import deepcopy
 
 
 class PCLProcessor:
   def __init__(self):
-    rospy.init_node('segment_pcl', anonymous=True)
     # rospy.Subscriber("/camera/depth/color/points", PointCloud2, self.pcl_callback, queue_size=1)
     self.rs_helpers = RealsenseHelpers()
     self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -26,7 +26,7 @@ class PCLProcessor:
     # load model and image preprocessing
     self.model, self.preprocess = clip.load("ViT-B/32", device=self.device, jit=False)
   
-  def segment_pcl(self, visualize=False):
+  def segment_pcl(self, visualize=False, verbose=False):
     msg = rospy.wait_for_message("/camera/depth/color/points", PointCloud2)
     rospy.loginfo("Received PointCloud2 message")
     pcd = orh.rospc_to_o3dpc(msg) 
@@ -34,7 +34,7 @@ class PCLProcessor:
     dist_mat = np_points.T
     dist_mat = transform_dist_mat(dist_mat, 'camera_color_optical_frame', 'aruco_base')
     np_points = dist_mat.T
-    limits = {'x_min': 0.46799999999999997, 'x_max': 1.157, 'y_min': -0.07800000000000007, 'y_max': 2.0, 'z_min': -0.7050000000000001, 'z_max': 0.6760000000000002}
+    limits = {'x_min': -0.6359999999999999, 'x_max': 0.2829999999999999, 'y_min': -2.0, 'y_max': 0.383, 'z_min': 0.41999999999999993, 'z_max': 1.0190000000000001}
     x_cond = np.logical_and(np_points[:, 0] >= limits["x_min"], np_points[:, 0] <= limits["x_max"])
     y_cond = np.logical_and(np_points[:, 1] >= limits["y_min"], np_points[:, 1] <= limits["y_max"])
     z_cond = np.logical_and(np_points[:, 2] >= limits["z_min"], np_points[:, 2] <= limits["z_max"])
@@ -65,13 +65,21 @@ class PCLProcessor:
     object_pixels = []
     object_points_wrt_camera = []
     object_points_wrt_aruco = []
+    object_centroids_wrt_aruco = []
     for i in range(max_label+1):
       label_indices = np.where(labels == i)[0]
       if len(label_indices) < 80:
         continue
       cluster = objects_cloud.select_by_index(label_indices)
+      center = np.asarray(cluster.get_center())
+      object_centroids_wrt_aruco.append(center)
+      if verbose:
+        print("center = ", center)
       if visualize:
-        o3d.visualization.draw_geometries([cluster])
+        new_cluster = deepcopy(cluster)
+        new_cluster.points.extend([center])
+        new_cluster.colors.extend([[0, 0, 1]])
+        o3d.visualization.draw_geometries([new_cluster])
       points_wrt_aruco = np.asarray(cluster.points).T
       points = transform_dist_mat(points_wrt_aruco, 'aruco_base', 'camera_color_optical_frame')
       intrinsics = self.rs_helpers.get_intrinsics(self.rs_helpers.color_intrin_topic)
@@ -104,10 +112,11 @@ class PCLProcessor:
         # print(minx, miny, maxx, maxy)
         cv2.imshow("image", image_np[miny:maxy, minx:maxx])
         val = cv2.waitKey(0) & 0xFF
-    return objects_boundaries, image_np, object_pixels, object_points_wrt_camera, object_points_wrt_aruco
+    return objects_boundaries, image_np, object_pixels, object_points_wrt_camera, object_points_wrt_aruco, object_centroids_wrt_aruco
   
-  def find_object(self, object_names):
-      objects_on_table_roi, image_np, object_pixels, _, _ = self.segment_pcl(visualize=False)
+  def find_object(self, object_names, verbose=False, visualize_result=True, visualize_steps=False):
+      objects_on_table_roi, image_np, object_pixels, object_points_wrt_camera,\
+      object_points_wrt_aruco, object_centroids_wrt_aruco = self.segment_pcl(verbose=verbose, visualize=visualize_steps)
       # image = PILImage.fromarray(np.uint8(image_np)*255)
       objects_images = []
       for object_roi in objects_on_table_roi:
@@ -115,14 +124,16 @@ class PCLProcessor:
           # cv2.imshow("object_image", np.array(obj_image))
           # cv2.waitKey(0)
           objects_images.append(obj_image)
-      object_names.append("unknown")
-      text_snippets = ["a photo of a {}".format(name) for name in object_names]
+      new_object_names = deepcopy(object_names)
+      new_object_names.append("unknown")
+      text_snippets = ["a photo of a {}".format(name) for name in new_object_names]
       # pre-process text
       text = clip.tokenize(text_snippets).to(self.device)
       
       # with torch.no_grad():
       #     text_features = model.encode_text(text)
       detected_objects = []
+      new_object_centroids = []
       for i, object_image in enumerate(objects_images):
           # pre-process image
           prepro_image = self.preprocess(object_image).unsqueeze(0).to(self.device)
@@ -135,28 +146,33 @@ class PCLProcessor:
               probs = logits_per_image.softmax(dim=-1).cpu().numpy()
           # print("Label probs:", ["{0:.10f}".format(i) for i in probs[0]])
           obj_idx = np.argmax(probs[0])
-          print(obj_idx)
-          print(probs[0])
+          if verbose:
+            print("object_index =", obj_idx)
+            print("probabilities = ", probs[0])
           if (probs[0][obj_idx] > 0.7):
-              print("Object {} is {}".format(i, object_names[obj_idx]))
-              detected_objects.append((obj_idx, objects_on_table_roi[i], i))
+              if verbose:
+               print("Object {} is {}".format(i, new_object_names[obj_idx]))
+              detected_objects.append({'name':new_object_names[obj_idx], 'roi':objects_on_table_roi[i], 'idx':i})
+              new_object_centroids.append(object_centroids_wrt_aruco[i])
       
-      for i, detected_object, img_idx in detected_objects:
-          # print("Object {} is {}".format(i, object_names[i]))
-          if detected_object is not None:
-              cv2.rectangle(image_np, (detected_object[0][0], detected_object[0][1]), (detected_object[1][0], detected_object[1][1]), (0, 255, 0), 2)
-              cv2.putText(image_np, object_names[i], (detected_object[0][0], detected_object[0][1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-              # image_np[object_pixels[img_idx][1], object_pixels[img_idx][0]] = [255, 0, 0]
-      cv2.imshow("image", image_np)
-      cv2.waitKey(10)
-      return detected_objects
+      if visualize_result:
+        for detected_object in detected_objects:
+            # print("Object {} is {}".format(detected_object['idx'], detected_object['name']))
+            if detected_object is not None:
+                cv2.rectangle(image_np, (detected_object['roi'][0][0], detected_object['roi'][0][1]), (detected_object['roi'][1][0], detected_object['roi'][1][1]), (0, 255, 0), 2)
+                cv2.putText(image_np, detected_object['name'], (detected_object['roi'][0][0], detected_object['roi'][0][1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                # image_np[object_pixels[detected_object['idx']][1], object_pixels[detected_object['idx']][0]] = [255, 0, 0]
+        cv2.imshow("image", image_np)
+        cv2.waitKey(10)
+      return detected_objects, object_points_wrt_aruco, new_object_centroids
 
 
 if __name__ == '__main__':
   pcl_processor = PCLProcessor()
+  rospy.init_node('segment_pcl', anonymous=True)
   while not rospy.is_shutdown():
     try:
-      pcl_processor.find_object(object_names=["cup", "bottle", "other"])
+      pcl_processor.find_object(object_names=["cup", "bottle", "other"], verbose=True, visualize_steps=True)
     except rospy.ROSInterruptException:
       print("Shutting down")
       cv2.destroyAllWindows()
